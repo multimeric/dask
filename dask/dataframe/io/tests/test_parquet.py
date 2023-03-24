@@ -196,7 +196,7 @@ def test_empty(tmpdir, write_engine, read_engine, index):
     fn = str(tmpdir)
     df = pd.DataFrame({"a": ["a", "b", "b"], "b": [4, 5, 6]})[:0]
     if index:
-        df.set_index("a", inplace=True, drop=True)
+        df = df.set_index("a", drop=True)
     ddf = dd.from_pandas(df, npartitions=2)
 
     ddf.to_parquet(fn, write_index=index, engine=write_engine, write_metadata_file=True)
@@ -208,7 +208,7 @@ def test_empty(tmpdir, write_engine, read_engine, index):
 def test_simple(tmpdir, write_engine, read_engine):
     fn = str(tmpdir)
     df = pd.DataFrame({"a": ["a", "b", "b"], "b": [4, 5, 6]})
-    df.set_index("a", inplace=True, drop=True)
+    df = df.set_index("a", drop=True)
     ddf = dd.from_pandas(df, npartitions=2)
     ddf.to_parquet(fn, engine=write_engine)
     read_df = dd.read_parquet(
@@ -221,7 +221,7 @@ def test_simple(tmpdir, write_engine, read_engine):
 def test_delayed_no_metadata(tmpdir, write_engine, read_engine):
     fn = str(tmpdir)
     df = pd.DataFrame({"a": ["a", "b", "b"], "b": [4, 5, 6]})
-    df.set_index("a", inplace=True, drop=True)
+    df = df.set_index("a", drop=True)
     ddf = dd.from_pandas(df, npartitions=2)
     ddf.to_parquet(
         fn, engine=write_engine, compute=False, write_metadata_file=False
@@ -845,9 +845,9 @@ def test_append_wo_index(tmpdir, engine, metadata_file):
     ("index", "offset"),
     [
         (
-            pd.date_range("2022-01-01", "2022-01-02", periods=500)
-            .to_series()
-            .astype("datetime64[ms]"),
+            # There is some odd behavior with date ranges and pyarrow in some cirucmstances!
+            # https://github.com/pandas-dev/pandas/issues/48573
+            pd.date_range("2022-01-01", "2022-01-31", freq="D"),
             pd.Timedelta(days=1),
         ),
         (pd.RangeIndex(0, 500, 1), 499),
@@ -1369,7 +1369,7 @@ def test_partition_on_duplicates(tmpdir, engine):
     out = dd.read_parquet(tmpdir, engine=engine).compute()
 
     assert len(df) == len(out)
-    for root, dirs, files in os.walk(tmpdir):
+    for _, _, files in os.walk(tmpdir):
         for file in files:
             assert file in (
                 "part.0.parquet",
@@ -2387,12 +2387,7 @@ def test_read_dir_nometa(tmpdir, write_engine, read_engine, divisions, remove_co
         os.unlink(os.path.join(tmp_path, "_common_metadata"))
 
     ddf2 = dd.read_parquet(tmp_path, engine=read_engine, calculate_divisions=divisions)
-    assert_eq(ddf, ddf2, check_divisions=False)
-    assert ddf.divisions == tuple(range(0, 420, 30))
-    if divisions is False:
-        assert ddf2.divisions == (None,) * 14
-    else:
-        assert ddf2.divisions == tuple(range(0, 420, 30))
+    assert_eq(ddf, ddf2, check_divisions=divisions)
 
 
 @write_read_engines()
@@ -2402,8 +2397,6 @@ def test_statistics_nometa(tmpdir, write_engine, read_engine):
 
     ddf2 = dd.read_parquet(tmp_path, engine=read_engine, calculate_divisions=True)
     assert_eq(ddf, ddf2)
-    assert ddf.divisions == tuple(range(0, 420, 30))
-    assert ddf2.divisions == tuple(range(0, 420, 30))
 
 
 @pytest.mark.parametrize("schema", ["infer", None])
@@ -3098,7 +3091,7 @@ def test_pandas_timestamp_overflow_pyarrow(tmpdir):
             precision we need to clamp our datetimes to something reasonable"""
 
             new_columns = []
-            for i, col in enumerate(arrow_table.columns):
+            for col in arrow_table.columns:
                 if pa.types.is_timestamp(col.type) and (
                     col.type.unit in ("s", "ms", "us")
                 ):
@@ -3340,7 +3333,7 @@ def test_divisions_with_null_partition(tmpdir, engine):
 def test_pyarrow_dataset_simple(tmpdir, engine):
     fn = str(tmpdir)
     df = pd.DataFrame({"a": [4, 5, 6], "b": ["a", "b", "b"]})
-    df.set_index("a", inplace=True, drop=True)
+    df = df.set_index("a", drop=True)
     ddf = dd.from_pandas(df, npartitions=2)
     ddf.to_parquet(fn, engine=engine)
     read_df = dd.read_parquet(fn, engine="pyarrow", calculate_divisions=True)
@@ -3422,6 +3415,36 @@ def test_pyarrow_dataset_filter_partitioned(tmpdir, split_row_groups):
         df[df["a"] == 5][["a"]],
         check_index=False,
     )
+
+
+def test_pyarrow_dataset_filter_on_partitioned(tmpdir, engine):
+    # See: https://github.com/dask/dask/issues/9246
+    df = pd.DataFrame({"val": range(7), "part": list("abcdefg")})
+    ddf = dd.from_map(
+        lambda i: df.iloc[i : i + 1],
+        range(7),
+    )
+    ddf.to_parquet(tmpdir, engine=engine, partition_on=["part"])
+
+    # Check that List[Tuple] filters are applied
+    read_ddf = dd.read_parquet(
+        tmpdir,
+        engine=engine,
+        filters=[("part", "==", "c")],
+    )
+    read_ddf["part"] = read_ddf["part"].astype("object")
+    assert_eq(df.iloc[2:3], read_ddf)
+
+    # Check that List[List[Tuple]] filters are aplied.
+    # (fastparquet doesn't support this format)
+    if engine == "pyarrow":
+        read_ddf = dd.read_parquet(
+            tmpdir,
+            engine=engine,
+            filters=[[("part", "==", "c")]],
+        )
+        read_ddf["part"] = read_ddf["part"].astype("object")
+        assert_eq(df.iloc[2:3], read_ddf)
 
 
 @PYARROW_MARK
@@ -3574,7 +3597,7 @@ def test_read_write_overwrite_is_true(tmpdir, engine):
     ddf = ddf.reset_index(drop=True)
     dd.to_parquet(ddf, tmpdir, engine=engine, overwrite=True)
 
-    # Keep the contents of the DataFrame constatn but change the # of partitions
+    # Keep the contents of the DataFrame constant but change the # of partitions
     ddf2 = ddf.repartition(npartitions=3)
 
     # Overwrite the existing Dataset with the new dataframe and evaluate
@@ -3759,7 +3782,7 @@ def test_custom_metadata(tmpdir, engine):
         files += [os.path.join(path, "_metadata")]
         for fn in files:
             _md = pq.ParquetFile(fn).metadata.metadata
-            for k, v in custom_metadata.items():
+            for k in custom_metadata.keys():
                 assert _md[k] == custom_metadata[k]
 
     # Make sure we raise an error if the custom metadata
@@ -4054,9 +4077,7 @@ def test_custom_filename_with_partition(tmpdir, engine):
             )
         for file in files:
             assert file in (
-                "0-cool.parquet",
-                "1-cool.parquet",
-                "2-cool.parquet",
+                *[f"{i}-cool.parquet" for i in range(df.npartitions)],
                 "_common_metadata",
                 "_metadata",
             )

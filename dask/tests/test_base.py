@@ -2,6 +2,7 @@ import dataclasses
 import datetime
 import inspect
 import os
+import pathlib
 import subprocess
 import sys
 import time
@@ -9,7 +10,7 @@ from collections import OrderedDict
 from concurrent.futures import Executor
 from enum import Enum, Flag, IntEnum, IntFlag
 from operator import add, mul
-from typing import Union
+from typing import NamedTuple, Union
 
 import pytest
 from tlz import compose, curry, merge, partial
@@ -243,7 +244,14 @@ def test_tokenize_partial_func_args_kwargs_consistent():
 
 
 def test_normalize_base():
-    for i in [1, 1.1, "1", slice(1, 2, 3), datetime.date(2021, 6, 25)]:
+    for i in [
+        1,
+        1.1,
+        "1",
+        slice(1, 2, 3),
+        datetime.date(2021, 6, 25),
+        pathlib.PurePath("/this/that"),
+    ]:
         assert normalize_token(i) is i
 
 
@@ -441,8 +449,14 @@ def test_tokenize_enum(enum_type):
     assert tokenize(Color.RED) != tokenize(Color.BLUE)
 
 
-ADataClass = dataclasses.make_dataclass("ADataClass", [("a", int)])
-BDataClass = dataclasses.make_dataclass("BDataClass", [("a", Union[int, float])])  # type: ignore
+@dataclasses.dataclass
+class ADataClass:
+    a: int
+
+
+@dataclasses.dataclass
+class BDataClass:
+    a: float
 
 
 def test_tokenize_dataclass():
@@ -576,6 +590,9 @@ def test_is_dask_collection():
 
 
 def test_unpack_collections():
+    class ANamedTuple(NamedTuple):
+        a: int
+
     a = delayed(1) + 5
     b = a + 1
     c = a + 2
@@ -592,12 +609,12 @@ def test_unpack_collections():
                 "d": (c, 2),  # tuple
                 "e": {a, 2, 3},  # set
                 "f": OrderedDict([("a", a)]),
+                "g": ADataClass(a=a),  # dataclass instance
+                "h": (ADataClass, a),  # dataclass constructor
+                "i": ANamedTuple(a=a),  # namedtuple instance
             },  # OrderedDict
             iterator,
         )  # Iterator
-
-        t[2]["f"] = ADataClass(a=a)
-        t[2]["g"] = (ADataClass, a)
 
         return t
 
@@ -1364,7 +1381,7 @@ def test_persist_item_change_name():
 
 
 def test_normalize_function_limited_size():
-    for i in range(1000):
+    for _ in range(1000):
         normalize_function(lambda x: x)
 
     assert 50 < len(function_cache) < 600

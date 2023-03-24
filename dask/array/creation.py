@@ -496,7 +496,7 @@ def indices(dimensions, dtype=int, chunks="auto"):
         xi.append(arange(dimensions[i], dtype=dtype, chunks=(chunks[i],)))
 
     grid = []
-    if np.prod(dimensions):
+    if all(dimensions):
         grid = meshgrid(*xi, indexing="ij")
 
     if grid:
@@ -1235,4 +1235,4 @@ def pad(array, pad_width, mode="constant", **kwargs):
     elif mode in ["reflect", "symmetric", "wrap"]:
         return pad_reuse(array, pad_width, mode, **kwargs)
 
-    assert False, "unreachable"
+    raise RuntimeError("unreachable")

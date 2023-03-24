@@ -1,10 +1,10 @@
-import importlib.metadata
 import itertools
 import logging
 import random
 import sys
 from array import array
 
+from dask.compatibility import entry_points
 from dask.utils import Dispatch
 
 sizeof = Dispatch(name="sizeof")
@@ -145,7 +145,7 @@ def register_pandas():
     @sizeof.register(pd.DataFrame)
     def sizeof_pandas_dataframe(df):
         p = sizeof(df.index)
-        for name, col in df.items():
+        for _, col in df.items():
             p += col.memory_usage(index=False)
             if col.dtype == object:
                 p += object_size(col._values)
@@ -216,12 +216,7 @@ def register_pyarrow():
 
 def _register_entry_point_plugins():
     """Register sizeof implementations exposed by the entry_point mechanism."""
-    if sys.version_info >= (3, 10):
-        sizeof_entry_points = importlib.metadata.entry_points(group="dask.sizeof")
-    else:
-        sizeof_entry_points = importlib.metadata.entry_points().get("dask.sizeof", [])
-
-    for entry_point in sizeof_entry_points:
+    for entry_point in entry_points(group="dask.sizeof"):
         registrar = entry_point.load()
         try:
             registrar(sizeof)

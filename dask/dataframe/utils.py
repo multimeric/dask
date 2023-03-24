@@ -8,6 +8,7 @@ import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from numbers import Number
+from typing import Callable, TypeVar, overload
 
 import numpy as np
 import pandas as pd
@@ -139,6 +140,18 @@ infer the metadata. This may lead to unexpected results, so providing
 ``meta`` is recommended. For more information, see
 ``dask.dataframe.utils.make_meta``.
 """
+
+T = TypeVar("T", bound=Callable)
+
+
+@overload
+def insert_meta_param_description(func: T) -> T:
+    ...
+
+
+@overload
+def insert_meta_param_description(pad: int) -> Callable[[T], T]:
+    ...
 
 
 def insert_meta_param_description(*args, **kwargs):
@@ -285,9 +298,10 @@ def clear_known_categories(x, cols=None, index=True):
 
 def _empty_series(name, dtype, index=None):
     if isinstance(dtype, str) and dtype == "category":
-        return pd.Series(
-            pd.Categorical([UNKNOWN_CATEGORIES]), name=name, index=index
-        ).iloc[:0]
+        s = pd.Series(pd.Categorical([UNKNOWN_CATEGORIES]), name=name).iloc[:0]
+        if index is not None:
+            s.index = make_meta(index)
+        return s
     return pd.Series([], dtype=dtype, name=name, index=index)
 
 
@@ -643,7 +657,9 @@ def assert_dask_dtypes(ddf, res, numeric_equal=True):
         ) or (a == b)
 
     if not is_dask_collection(res) and is_dataframe_like(res):
-        for col, a, b in pd.concat([ddf._meta.dtypes, res.dtypes], axis=1).itertuples():
+        for a, b in pd.concat([ddf._meta.dtypes, res.dtypes], axis=1).itertuples(
+            index=False
+        ):
             assert eq_dtypes(a, b)
     elif not is_dask_collection(res) and (is_index_like(res) or is_series_like(res)):
         a = ddf._meta.dtype
@@ -714,3 +730,7 @@ def drop_by_shallow_copy(df, columns, errors="raise"):
         columns = [columns]
     df2.drop(columns=columns, inplace=True, errors=errors)
     return df2
+
+
+class AttributeNotImplementedError(NotImplementedError, AttributeError):
+    """NotImplementedError and AttributeError"""

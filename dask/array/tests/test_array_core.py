@@ -9,6 +9,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
+import math
 import operator
 import os
 import time
@@ -18,7 +19,6 @@ from io import StringIO
 from operator import add, sub
 from threading import Lock
 
-from numpy import nancumprod, nancumsum
 from tlz import concat, countby, merge
 from tlz.curried import identity
 
@@ -1785,7 +1785,7 @@ def test_coerce():
     a2 = np.arange(2)
     d2 = da.from_array(a2, chunks=(2,))
     for func in (int, float, complex):
-        pytest.raises(TypeError, lambda: func(d2))
+        pytest.raises(TypeError, lambda func=func: func(d2))
 
 
 def test_bool():
@@ -1873,9 +1873,9 @@ def test_store_delayed_target():
         assert_eq(st[0], a)
         assert_eq(st[1], b)
 
-        pytest.raises(ValueError, lambda: store([a], [at, bt]))
-        pytest.raises(ValueError, lambda: store(at, at))
-        pytest.raises(ValueError, lambda: store([at, bt], [at, bt]))
+        pytest.raises(ValueError, lambda at=at, bt=bt: store([a], [at, bt]))
+        pytest.raises(ValueError, lambda at=at: store(at, at))
+        pytest.raises(ValueError, lambda at=at, bt=bt: store([at, bt], [at, bt]))
 
 
 def test_store():
@@ -2103,7 +2103,7 @@ def test_store_locks():
             assert False
 
     # Verify number of lock calls
-    nchunks = np.sum([np.prod([len(c) for c in e.chunks]) for e in [a, b]])
+    nchunks = sum(math.prod(map(len, e.chunks)) for e in (a, b))
     for c in (False, True):
         at = np.zeros(shape=(10, 10))
         bt = np.zeros(shape=(10, 10))
@@ -2284,6 +2284,34 @@ def test_astype():
 
     # Check it's a noop
     assert d.astype("f8") is d
+
+
+def test_astype_gh1151():
+    a = np.arange(5).astype(np.int32)
+    b = da.from_array(a, (1,))
+    assert_eq(a.astype(np.int16), b.astype(np.int16))
+
+
+def test_astype_gh9318():
+    # `order`` kwarg in `astype` should not cause an error
+    a = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], order="C")
+    b = da.from_array(a, chunks=(2, 2))
+    result_a = a.astype(float, order="F")
+    result_b = b.astype(float, order="F")  # if no error at this line, pytest passes
+    assert_eq(result_a, result_b)  # won't check the order matches, but checks results
+
+
+@pytest.mark.xfail(reason="Github issue https://github.com/dask/dask/issues/9316")
+def test_astype_gh9316():
+    # Issue https://github.com/dask/dask/issues/9316
+    # Can be combined with test_astype_gh9318 above when XFAIL marker is removed
+    a = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], order="C")
+    b = da.from_array(a, chunks=(2, 2))
+    result_a = a.astype(float, order="F")
+    result_b = b.astype(float, order="F")
+    result_b = result_b.compute()
+    assert result_a.flags.c_contiguous == result_b.flags.c_contiguous
+    assert result_a.flags.f_contiguous == result_b.flags.f_contiguous
 
 
 def test_arithmetic():
@@ -3474,15 +3502,15 @@ def test_cumulative():
     assert_eq(x.cumsum(axis=0), np.arange(20).cumsum())
     assert_eq(x.cumprod(axis=0), np.arange(20).cumprod())
 
-    assert_eq(da.nancumsum(x, axis=0), nancumsum(np.arange(20)))
-    assert_eq(da.nancumprod(x, axis=0), nancumprod(np.arange(20)))
+    assert_eq(da.nancumsum(x, axis=0), np.nancumsum(np.arange(20)))
+    assert_eq(da.nancumprod(x, axis=0), np.nancumprod(np.arange(20)))
 
     a = np.random.random(20)
     rs = np.random.RandomState(0)
     a[rs.rand(*a.shape) < 0.5] = np.nan
     x = da.from_array(a, chunks=5)
-    assert_eq(da.nancumsum(x, axis=0), nancumsum(a))
-    assert_eq(da.nancumprod(x, axis=0), nancumprod(a))
+    assert_eq(da.nancumsum(x, axis=0), np.nancumsum(a))
+    assert_eq(da.nancumprod(x, axis=0), np.nancumprod(a))
 
     a = np.random.random((20, 24))
     x = da.from_array(a, chunks=(6, 5))
@@ -3491,19 +3519,19 @@ def test_cumulative():
     assert_eq(x.cumprod(axis=0), a.cumprod(axis=0))
     assert_eq(x.cumprod(axis=1), a.cumprod(axis=1))
 
-    assert_eq(da.nancumsum(x, axis=0), nancumsum(a, axis=0))
-    assert_eq(da.nancumsum(x, axis=1), nancumsum(a, axis=1))
-    assert_eq(da.nancumprod(x, axis=0), nancumprod(a, axis=0))
-    assert_eq(da.nancumprod(x, axis=1), nancumprod(a, axis=1))
+    assert_eq(da.nancumsum(x, axis=0), np.nancumsum(a, axis=0))
+    assert_eq(da.nancumsum(x, axis=1), np.nancumsum(a, axis=1))
+    assert_eq(da.nancumprod(x, axis=0), np.nancumprod(a, axis=0))
+    assert_eq(da.nancumprod(x, axis=1), np.nancumprod(a, axis=1))
 
     a = np.random.random((20, 24))
     rs = np.random.RandomState(0)
     a[rs.rand(*a.shape) < 0.5] = np.nan
     x = da.from_array(a, chunks=(6, 5))
-    assert_eq(da.nancumsum(x, axis=0), nancumsum(a, axis=0))
-    assert_eq(da.nancumsum(x, axis=1), nancumsum(a, axis=1))
-    assert_eq(da.nancumprod(x, axis=0), nancumprod(a, axis=0))
-    assert_eq(da.nancumprod(x, axis=1), nancumprod(a, axis=1))
+    assert_eq(da.nancumsum(x, axis=0), np.nancumsum(a, axis=0))
+    assert_eq(da.nancumsum(x, axis=1), np.nancumsum(a, axis=1))
+    assert_eq(da.nancumprod(x, axis=0), np.nancumprod(a, axis=0))
+    assert_eq(da.nancumprod(x, axis=1), np.nancumprod(a, axis=1))
 
     a = np.random.random((20, 24, 13))
     x = da.from_array(a, chunks=(6, 5, 4))
@@ -3511,16 +3539,16 @@ def test_cumulative():
         assert_eq(x.cumsum(axis=axis), a.cumsum(axis=axis))
         assert_eq(x.cumprod(axis=axis), a.cumprod(axis=axis))
 
-        assert_eq(da.nancumsum(x, axis=axis), nancumsum(a, axis=axis))
-        assert_eq(da.nancumprod(x, axis=axis), nancumprod(a, axis=axis))
+        assert_eq(da.nancumsum(x, axis=axis), np.nancumsum(a, axis=axis))
+        assert_eq(da.nancumprod(x, axis=axis), np.nancumprod(a, axis=axis))
 
     a = np.random.random((20, 24, 13))
     rs = np.random.RandomState(0)
     a[rs.rand(*a.shape) < 0.5] = np.nan
     x = da.from_array(a, chunks=(6, 5, 4))
     for axis in [0, 1, 2, -1, -2, -3]:
-        assert_eq(da.nancumsum(x, axis=axis), nancumsum(a, axis=axis))
-        assert_eq(da.nancumprod(x, axis=axis), nancumprod(a, axis=axis))
+        assert_eq(da.nancumsum(x, axis=axis), np.nancumsum(a, axis=axis))
+        assert_eq(da.nancumprod(x, axis=axis), np.nancumprod(a, axis=axis))
 
     with pytest.raises(ValueError):
         x.cumsum(axis=3)
@@ -3569,12 +3597,6 @@ def test_npartitions():
     assert da.ones((5, 5), chunks=(2, 3)).npartitions == 6
 
 
-def test_astype_gh1151():
-    a = np.arange(5).astype(np.int32)
-    b = da.from_array(a, (1,))
-    assert_eq(a.astype(np.int16), b.astype(np.int16))
-
-
 def test_elemwise_name():
     assert (da.ones(5, chunks=2) + 1).name.startswith("add-")
 
@@ -3607,6 +3629,12 @@ def test_array_picklable(array):
 
     a2 = loads(dumps(array))
     assert_eq(array, a2)
+
+    a3 = da.ma.masked_equal(array, 0)
+    assert isinstance(a3._meta, np.ma.MaskedArray)
+    a4 = loads(dumps(a3))
+    assert_eq(a3, a4)
+    assert isinstance(a4._meta, np.ma.MaskedArray)
 
 
 def test_from_array_raises_on_bad_chunks():
@@ -4416,9 +4444,9 @@ def test_meta(dtype):
         (100, 10, (10,) * 10),
         (20, 10, (10, 10)),
         (20, 5, (5, 5, 5, 5)),
-        (24, 5, (4, 4, 4, 4, 4, 4)),  # common factor is close, use it
+        (24, 5, (5, 5, 5, 5, 4)),
         (23, 5, (5, 5, 5, 5, 3)),  # relatively prime, don't use 1s
-        (1000, 167, (125,) * 8),  # find close value
+        (1000, 167, (167, 167, 167, 167, 167, 165)),
     ],
 )
 def test_normalize_chunks_auto_1d(shape, limit, expected):
@@ -4468,7 +4496,7 @@ def test_from_array_chunks_dict():
     with dask.config.set({"array.chunk-size": "128kiB"}):
         x = np.empty((100, 100, 100))
         y = da.from_array(x, chunks={0: 10, 1: -1, 2: "auto"})
-        z = da.from_array(x, chunks=(10, 100, 10))
+        z = da.from_array(x, chunks=(10, 100, (16,) * 6 + (4,)))
         assert y.chunks == z.chunks
 
 
@@ -4758,7 +4786,7 @@ def test_blockview():
     assert_eq(blockview[[0, 1, 2]], x[:6])
     assert_eq(blockview[[3, 0, 2]], np.array([6, 7, 0, 1, 4, 5]))
     assert_eq(blockview.shape, tuple(map(len, x.chunks)))
-    assert_eq(blockview.size, np.prod(blockview.shape))
+    assert_eq(blockview.size, math.prod(blockview.shape))
     assert_eq(
         blockview.ravel(), [blockview[idx] for idx in np.ndindex(blockview.shape)]
     )
@@ -4769,7 +4797,7 @@ def test_blockview():
     assert_eq(blockview[0, :3], x[:4, :15])
     assert_eq(blockview[:, :3], x[:, :15])
     assert_eq(blockview.shape, tuple(map(len, x.chunks)))
-    assert_eq(blockview.size, np.prod(blockview.shape))
+    assert_eq(blockview.size, math.prod(blockview.shape))
     assert_eq(
         blockview.ravel(), [blockview[idx] for idx in np.ndindex(blockview.shape)]
     )
@@ -4778,7 +4806,7 @@ def test_blockview():
     blockview = BlockView(x)
     assert_eq(blockview[0, :, 0], np.ones((10, 40, 10)))
     assert_eq(blockview.shape, tuple(map(len, x.chunks)))
-    assert_eq(blockview.size, np.prod(blockview.shape))
+    assert_eq(blockview.size, math.prod(blockview.shape))
     assert_eq(
         blockview.ravel(), [blockview[idx] for idx in np.ndindex(blockview.shape)]
     )
@@ -4900,7 +4928,7 @@ def test_scipy_sparse_concatenate(axis):
 
     xs = []
     ys = []
-    for i in range(2):
+    for _ in range(2):
         x = rs.random((1000, 10), chunks=(100, 10))
         x[x < 0.9] = 0
         xs.append(x)
@@ -4987,7 +5015,7 @@ def test_nbytes_auto():
     chunks = normalize_chunks("33B", shape=(10, 10), dtype="float64")
     assert chunks == ((2, 2, 2, 2, 2), (2, 2, 2, 2, 2))
     chunks = normalize_chunks("1800B", shape=(10, 20, 30), dtype="float64")
-    assert chunks == ((5, 5), (5, 5, 5, 5), (6, 6, 6, 6, 6))
+    assert chunks == ((6, 4), (6, 6, 6, 2), (6, 6, 6, 6, 6))
 
     with pytest.raises(ValueError):
         normalize_chunks("10B", shape=(10,), limit=20, dtype="float64")

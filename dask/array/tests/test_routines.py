@@ -13,6 +13,7 @@ from dask.delayed import delayed
 np = pytest.importorskip("numpy")
 
 import dask.array as da
+from dask.array.numpy_compat import _numpy_123
 from dask.array.utils import assert_eq, same_keys
 
 
@@ -244,8 +245,8 @@ def test_rot90(kwargs, shape):
     np_a = np.random.random(shape)
     da_a = da.from_array(np_a, chunks=1)
 
-    np_func = getattr(np, "rot90")
-    da_func = getattr(da, "rot90")
+    np_func = np.rot90
+    da_func = da.rot90
 
     try:
         for axis in axes[:2]:
@@ -1489,6 +1490,17 @@ def test_squeeze(is_func, axis):
     assert d_s.chunks == exp_d_s_chunks
 
 
+@pytest.mark.parametrize("shape", [(1,), (1, 1)])
+def test_squeeze_1d_array(shape):
+    a = np.full(shape=shape, fill_value=2)
+    a_s = np.squeeze(a)
+    d = da.from_array(a, chunks=(1))
+    d_s = da.squeeze(d)
+    assert isinstance(d_s, da.Array)
+    assert isinstance(d_s.compute(), np.ndarray)
+    assert_eq(d_s, a_s)
+
+
 def test_vstack():
     x = np.arange(5)
     y = np.ones(5)
@@ -2554,17 +2566,31 @@ def test_average(a, returned):
     assert_eq(np_avg, da_avg)
 
 
-def test_average_weights():
+@pytest.mark.parametrize("a", [np.arange(11), np.arange(6).reshape((3, 2))])
+def test_average_keepdims(a):
+    d_a = da.from_array(a, chunks=2)
+
+    da_avg = da.average(d_a, keepdims=True)
+
+    if _numpy_123:
+        np_avg = np.average(a, keepdims=True)
+        assert_eq(np_avg, da_avg)
+
+
+@pytest.mark.parametrize("keepdims", [False, True])
+def test_average_weights(keepdims):
     a = np.arange(6).reshape((3, 2))
     d_a = da.from_array(a, chunks=2)
 
     weights = np.array([0.25, 0.75])
     d_weights = da.from_array(weights, chunks=2)
 
-    np_avg = np.average(a, weights=weights, axis=1)
-    da_avg = da.average(d_a, weights=d_weights, axis=1)
+    da_avg = da.average(d_a, weights=d_weights, axis=1, keepdims=keepdims)
 
-    assert_eq(np_avg, da_avg)
+    if _numpy_123:
+        assert_eq(da_avg, np.average(a, weights=weights, axis=1, keepdims=keepdims))
+    elif not keepdims:
+        assert_eq(da_avg, np.average(a, weights=weights, axis=1))
 
 
 def test_average_raises():

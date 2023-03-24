@@ -999,6 +999,13 @@ def fix_overlap(ddf, mins, maxes, lens):
     name = "fix-overlap-" + tokenize(ddf, mins, maxes, lens)
 
     non_empties = [i for i, length in enumerate(lens) if length != 0]
+    # If all empty, collapse into one partition
+    if len(non_empties) == 0:
+        divisions = (None, None)
+        dsk = {(name, 0): (ddf._name, 0)}
+        graph = HighLevelGraph.from_collections(name, dsk, dependencies=[ddf])
+        return new_dd_object(graph, name, ddf._meta, divisions)
+
     # drop empty partitions by mapping each partition in a new graph to a particular
     # partition on the old graph.
     dsk = {(name, i): (ddf._name, div) for i, div in enumerate(non_empties)}
@@ -1022,10 +1029,12 @@ def fix_overlap(ddf, mins, maxes, lens):
         # this partition (i) if the data from this partition will need to be moved
         # to the next partition (i+1) anyway.  If we concatenate data too early,
         # we may lose rows (https://github.com/dask/dask/issues/6972).
-        if i == len(mins) - 2 or divisions[i] != divisions[i + 1]:
-            frames.append(ddf_keys[i])
-            dsk[(name, i)] = (methods.concat, frames)
-            frames = []
+        if divisions[i] == divisions[i + 1] and i + 1 in overlap:
+            continue
+
+        frames.append(ddf_keys[i])
+        dsk[(name, i)] = (methods.concat, frames)
+        frames = []
 
     graph = HighLevelGraph.from_collections(name, dsk, dependencies=[ddf])
     return new_dd_object(graph, name, ddf._meta, divisions)

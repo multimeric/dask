@@ -5,6 +5,7 @@ import datetime
 import hashlib
 import inspect
 import os
+import pathlib
 import pickle
 import threading
 import uuid
@@ -32,7 +33,7 @@ from dask.core import literal, quote
 from dask.hashing import hash_buffer_hex
 from dask.system import CPU_COUNT
 from dask.typing import SchedulerGetCallable
-from dask.utils import Dispatch, apply, ensure_dict, key_split
+from dask.utils import Dispatch, apply, ensure_dict, is_namedtuple_instance, key_split
 
 __all__ = (
     "DaskMethodsMixin",
@@ -336,13 +337,8 @@ def compute_as_if_collection(cls, dsk, keys, scheduler=None, get=None, **kwargs)
     """Compute a graph as if it were of type cls.
 
     Allows for applying the same optimizations and default scheduler."""
-    from dask.highlevelgraph import HighLevelGraph
-
     schedule = get_scheduler(scheduler=scheduler, cls=cls, get=get)
     dsk2 = optimization_function(cls)(dsk, keys, **kwargs)
-    # see https://github.com/dask/dask/issues/8991.
-    # This merge should be removed once the underlying issue is fixed.
-    dsk2 = HighLevelGraph.merge(dsk2)
     return schedule(dsk2, keys, **kwargs)
 
 
@@ -467,6 +463,8 @@ def unpack_collections(*args, traverse=True):
                         ],
                     ),
                 )
+            elif is_namedtuple_instance(expr):
+                tsk = (typ, *[_unpack(i) for i in expr])
             else:
                 return expr
 
@@ -950,6 +948,7 @@ normalize_token.register(
         type(Ellipsis),
         datetime.date,
         datetime.timedelta,
+        pathlib.PurePath,
     ),
     identity,
 )
@@ -1188,8 +1187,8 @@ def register_numpy():
                 offset = 0  # root memmap's have mmap object as base
             if hasattr(
                 x, "offset"
-            ):  # offset numpy used while opening, and not the offset to the beginning of the file
-                offset += getattr(x, "offset")
+            ):  # offset numpy used while opening, and not the offset to the beginning of file
+                offset += x.offset
             return (
                 x.filename,
                 os.path.getmtime(x.filename),

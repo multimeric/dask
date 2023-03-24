@@ -111,6 +111,7 @@ def _write_partitioned(
             subschema = subschema.remove(subschema.get_field_index(col))
 
     md_list = []
+    partition_keys = partition_keys[0] if len(partition_keys) == 1 else partition_keys
     for keys, subgroup in data_df.groupby(partition_keys):
         if not isinstance(keys, tuple):
             keys = (keys,)
@@ -1160,7 +1161,7 @@ class ArrowDatasetEngine(Engine):
 
         # Check if this is a very simple case where we can just return
         # the path names
-        if gather_statistics is False and not split_row_groups:
+        if gather_statistics is False and not (split_row_groups or filters):
             return (
                 [
                     {"piece": (full_path, None, None)}
@@ -1302,7 +1303,7 @@ class ArrowDatasetEngine(Engine):
         aggregation_depth = dataset_info_kwargs["aggregation_depth"]
         chunksize = dataset_info_kwargs["chunksize"]
 
-        # Intialize row-group and statistiscs data structures
+        # Intialize row-group and statistics data structures
         file_row_groups = defaultdict(list)
         file_row_group_stats = defaultdict(list)
         file_row_group_column_stats = defaultdict(list)
@@ -1350,7 +1351,7 @@ class ArrowDatasetEngine(Engine):
                                 "total_byte_size": row_group.total_byte_size,
                             }
                         cstats = []
-                        for name, i in stat_col_indices.items():
+                        for name in stat_col_indices.keys():
                             if name in statistics:
                                 cmin = statistics[name]["min"]
                                 cmax = statistics[name]["max"]
@@ -1492,7 +1493,7 @@ class ArrowDatasetEngine(Engine):
                 )
 
                 # Extract hive-partition keys, and make sure they
-                # are orderd the same as they are in `partitions`
+                # are ordered the same as they are in `partitions`
                 raw_keys = pa_ds._get_partition_keys(frag.partition_expression)
                 partition_keys = [
                     (hive_part.name, raw_keys[hive_part.name])

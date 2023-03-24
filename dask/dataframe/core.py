@@ -33,7 +33,11 @@ from dask.base import (
 from dask.blockwise import Blockwise, BlockwiseDep, BlockwiseDepDict, blockwise
 from dask.context import globalmethod
 from dask.dataframe import methods
-from dask.dataframe._compat import PANDAS_GT_140, PANDAS_GT_150
+from dask.dataframe._compat import (
+    PANDAS_GT_140,
+    PANDAS_GT_150,
+    check_numeric_only_deprecation,
+)
 from dask.dataframe.accessor import CachedAccessor, DatetimeAccessor, StringAccessor
 from dask.dataframe.categorical import CategoricalAccessor, categorize
 from dask.dataframe.dispatch import (
@@ -46,6 +50,7 @@ from dask.dataframe.optimize import optimize
 from dask.dataframe.utils import (
     PANDAS_GT_110,
     PANDAS_GT_120,
+    AttributeNotImplementedError,
     check_matching_columns,
     clear_known_categories,
     drop_by_shallow_copy,
@@ -75,6 +80,7 @@ from dask.utils import (
     is_arraylike,
     iter_chunks,
     key_split,
+    maybe_pluralize,
     memory_repr,
     parse_bytes,
     partial_by_order,
@@ -539,7 +545,7 @@ class _Frame(DaskMethodsMixin, OperatorMethodMixin):
         data = self._repr_data().to_string(max_rows=5, show_dimensions=False)
         _str_fmt = """Dask {klass} Structure:
 {data}
-Dask Name: {name}, {task} tasks"""
+Dask Name: {name}, {layers}"""
         if len(self.columns) == 0:
             data = data.partition("\n")[-1].replace("Index", "Divisions")
             _str_fmt = f"Empty {_str_fmt}"
@@ -547,7 +553,7 @@ Dask Name: {name}, {task} tasks"""
             klass=self.__class__.__name__,
             data=data,
             name=key_split(self._name),
-            task=len(self.dask),
+            layers=maybe_pluralize(len(self.dask.layers), "graph layer"),
         )
 
     @property
@@ -762,7 +768,8 @@ Dask Name: {name}, {task} tasks"""
             Whether to enforce at runtime that the structure of the DataFrame
             produced by ``func`` actually matches the structure of ``meta``.
             This will rename and reorder columns for each partition,
-            and will raise an error if this doesn't work or types don't match.
+            and will raise an error if this doesn't work,
+            but it won't raise if dtypes don't match.
         transform_divisions : bool, default True
             Whether to apply the function onto the divisions and apply those
             transformed divisions to the output.
@@ -895,7 +902,8 @@ Dask Name: {name}, {task} tasks"""
             Whether to enforce at runtime that the structure of the DataFrame
             produced by ``func`` actually matches the structure of ``meta``.
             This will rename and reorder columns for each partition,
-            and will raise an error if this doesn't work or types don't match.
+            and will raise an error if this doesn't work,
+            but it won't raise if dtypes don't match.
         transform_divisions : bool, default True
             Whether to apply the function onto the divisions and apply those
             transformed divisions to the output.
@@ -1384,7 +1392,9 @@ Dask Name: {name}, {task} tasks"""
         partition_size: int or string, optional
             Max number of bytes of memory for each partition. Use numbers or
             strings like 5MB. If specified npartitions and divisions will be
-            ignored.
+            ignored. Note that the size reflects the number of bytes used as
+            computed by ``pandas.DataFrame.memory_usage``, which will not
+            necessarily match the size when storing to disk.
 
             .. warning::
 
@@ -1417,6 +1427,11 @@ Dask Name: {name}, {task} tasks"""
         >>> df = df.repartition(npartitions=10)  # doctest: +SKIP
         >>> df = df.repartition(divisions=[0, 5, 10, 20])  # doctest: +SKIP
         >>> df = df.repartition(freq='7d')  # doctest: +SKIP
+
+        See Also
+        --------
+        DataFrame.memory_usage_per_partition
+        pandas.DataFrame.memory_usage
         """
         if isinstance(divisions, int):
             npartitions = divisions
@@ -1875,26 +1890,49 @@ Dask Name: {name}, {task} tasks"""
         )
         return maybe_shift_divisions(out, periods, freq=freq)
 
-    def _reduction_agg(self, name, axis=None, skipna=True, split_every=False, out=None):
+    def _reduction_agg(
+        self,
+        name,
+        axis=None,
+        skipna=True,
+        split_every=False,
+        out=None,
+        numeric_only=None,
+    ):
         axis = self._validate_axis(axis)
 
-        meta = getattr(self._meta_nonempty, name)(axis=axis, skipna=skipna)
-        token = self._token_prefix + name
+        if has_keyword(getattr(self._meta_nonempty, name), "numeric_only"):
+            numeric_only_kwargs = {"numeric_only": numeric_only}
+        else:
+            numeric_only_kwargs = {}
 
-        method = getattr(M, name)
+        with check_numeric_only_deprecation():
+            meta = getattr(self._meta_nonempty, name)(
+                axis=axis, skipna=skipna, **numeric_only_kwargs
+            )
+
+        token = self._token_prefix + name
         if axis == 1:
             result = self.map_partitions(
-                method, meta=meta, token=token, skipna=skipna, axis=axis
+                _getattr_numeric_only,
+                meta=meta,
+                token=token,
+                skipna=skipna,
+                axis=axis,
+                _dask_method_name=name,
+                **numeric_only_kwargs,
             )
             return handle_out(out, result)
         else:
             result = self.reduction(
-                method,
+                _getattr_numeric_only,
                 meta=meta,
                 token=token,
                 skipna=skipna,
                 axis=axis,
                 split_every=split_every,
+                _dask_method_name=name,
+                **numeric_only_kwargs,
             )
             if isinstance(self, DataFrame):
                 result.divisions = (self.columns.min(), self.columns.max())
@@ -1971,7 +2009,11 @@ Dask Name: {name}, {task} tasks"""
         numeric_only=None,
     ):
         result = self._reduction_agg(
-            "prod", axis=axis, skipna=skipna, split_every=split_every, out=out
+            "prod",
+            axis=axis,
+            skipna=skipna,
+            split_every=split_every,
+            out=out,
         )
         if min_count:
             cond = self.notnull().sum(axis=axis) >= min_count
@@ -1992,7 +2034,11 @@ Dask Name: {name}, {task} tasks"""
         self, axis=None, skipna=True, split_every=False, out=None, numeric_only=None
     ):
         return self._reduction_agg(
-            "max", axis=axis, skipna=skipna, split_every=split_every, out=out
+            "max",
+            axis=axis,
+            skipna=skipna,
+            split_every=split_every,
+            out=out,
         )
 
     @_numeric_only
@@ -2001,7 +2047,11 @@ Dask Name: {name}, {task} tasks"""
         self, axis=None, skipna=True, split_every=False, out=None, numeric_only=None
     ):
         return self._reduction_agg(
-            "min", axis=axis, skipna=skipna, split_every=split_every, out=out
+            "min",
+            axis=axis,
+            skipna=skipna,
+            split_every=split_every,
+            out=out,
         )
 
     @derived_from(pd.DataFrame)
@@ -2121,7 +2171,11 @@ Dask Name: {name}, {task} tasks"""
     ):
         axis = self._validate_axis(axis)
         _raise_if_object_series(self, "mean")
-        meta = self._meta_nonempty.mean(axis=axis, skipna=skipna)
+        # NOTE: Do we want to warn here?
+        with check_numeric_only_deprecation():
+            meta = self._meta_nonempty.mean(
+                axis=axis, skipna=skipna, numeric_only=numeric_only
+            )
         if axis == 1:
             result = map_partitions(
                 M.mean,
@@ -2131,6 +2185,7 @@ Dask Name: {name}, {task} tasks"""
                 axis=axis,
                 skipna=skipna,
                 enforce_metadata=False,
+                numeric_only=numeric_only,
             )
             return handle_out(out, result)
         else:
@@ -2151,6 +2206,34 @@ Dask Name: {name}, {task} tasks"""
                 result.divisions = (self.columns.min(), self.columns.max())
             return handle_out(out, result)
 
+    def median_approximate(
+        self,
+        axis=None,
+        method="default",
+    ):
+        """Return the approximate median of the values over the requested axis.
+
+        Parameters
+        ----------
+        axis : {0, 1, "index", "columns"} (default 0)
+            0 or ``"index"`` for row-wise, 1 or ``"columns"`` for column-wise
+        method : {'default', 'tdigest', 'dask'}, optional
+            What method to use. By default will use Dask's internal custom
+            algorithm (``"dask"``).  If set to ``"tdigest"`` will use tdigest
+            for floats and ints and fallback to the ``"dask"`` otherwise.
+        """
+        return self.quantile(q=0.5, axis=axis, method=method).rename(None)
+
+    @derived_from(pd.DataFrame)
+    def median(self, axis=None, method="default"):
+        if axis in (1, "columns") or self.npartitions == 1:
+            # Can provide an exact median in these cases
+            return self.median_approximate(axis=axis, method=method)
+        raise NotImplementedError(
+            "Dask doesn't implement an exact median in all cases as this is hard to do in parallel. "
+            "See the `median_approximate` method instead, which uses an approximate algorithm."
+        )
+
     @_numeric_only
     @derived_from(pd.DataFrame)
     def var(
@@ -2165,7 +2248,10 @@ Dask Name: {name}, {task} tasks"""
     ):
         axis = self._validate_axis(axis)
         _raise_if_object_series(self, "var")
-        meta = self._meta_nonempty.var(axis=axis, skipna=skipna)
+        with check_numeric_only_deprecation():
+            meta = self._meta_nonempty.var(
+                axis=axis, skipna=skipna, numeric_only=numeric_only
+            )
         if axis == 1:
             result = map_partitions(
                 M.var,
@@ -2176,6 +2262,7 @@ Dask Name: {name}, {task} tasks"""
                 skipna=skipna,
                 ddof=ddof,
                 enforce_metadata=False,
+                numeric_only=numeric_only,
             )
             return handle_out(out, result)
         else:
@@ -2312,7 +2399,10 @@ Dask Name: {name}, {task} tasks"""
         _raise_if_object_series(self, "std")
         _raise_if_not_series_or_dataframe(self, "std")
 
-        meta = self._meta_nonempty.std(axis=axis, skipna=skipna)
+        with check_numeric_only_deprecation():
+            meta = self._meta_nonempty.std(
+                axis=axis, skipna=skipna, numeric_only=numeric_only
+            )
         is_df_like = is_dataframe_like(self._meta)
         needs_time_conversion = False
         numeric_dd = self
@@ -2339,6 +2429,7 @@ Dask Name: {name}, {task} tasks"""
                 skipna=skipna,
                 ddof=ddof,
                 enforce_metadata=False,
+                numeric_only=numeric_only,
                 parent_meta=self._meta,
             )
             return handle_out(out, result)
@@ -2632,7 +2723,10 @@ Dask Name: {name}, {task} tasks"""
     def sem(self, axis=None, skipna=True, ddof=1, split_every=False, numeric_only=None):
         axis = self._validate_axis(axis)
         _raise_if_object_series(self, "sem")
-        meta = self._meta_nonempty.sem(axis=axis, skipna=skipna, ddof=ddof)
+        with check_numeric_only_deprecation():
+            meta = self._meta_nonempty.sem(
+                axis=axis, skipna=skipna, ddof=ddof, numeric_only=numeric_only
+            )
         if axis == 1:
             return map_partitions(
                 M.sem,
@@ -2643,6 +2737,7 @@ Dask Name: {name}, {task} tasks"""
                 skipna=skipna,
                 ddof=ddof,
                 parent_meta=self._meta,
+                numeric_only=numeric_only,
             )
         else:
             num = self._get_numeric_data()
@@ -2662,7 +2757,8 @@ Dask Name: {name}, {task} tasks"""
                 result.divisions = (self.columns.min(), self.columns.max())
             return result
 
-    def quantile(self, q=0.5, axis=0, method="default"):
+    @_numeric_only
+    def quantile(self, q=0.5, axis=0, numeric_only=True, method="default"):
         """Approximate row-wise and precise column-wise quantiles of DataFrame
 
         Parameters
@@ -2678,11 +2774,13 @@ Dask Name: {name}, {task} tasks"""
         """
         axis = self._validate_axis(axis)
         keyname = "quantiles-concat--" + tokenize(self, q, axis)
+        meta = self._meta.quantile(q, axis=axis, numeric_only=numeric_only)
 
         if axis == 1:
             if isinstance(q, list):
                 # Not supported, the result will have current index as columns
                 raise ValueError("'q' must be scalar when axis=1 is specified")
+
             return map_partitions(
                 M.quantile,
                 self,
@@ -2690,12 +2788,12 @@ Dask Name: {name}, {task} tasks"""
                 axis,
                 token=keyname,
                 enforce_metadata=False,
+                numeric_only=numeric_only,
                 meta=(q, "f8"),
                 parent_meta=self._meta,
             )
         else:
             _raise_if_object_series(self, "quantile")
-            meta = self._meta.quantile(q, axis=axis)
             num = self._get_numeric_data()
             quantiles = tuple(quantile(self[c], q, method) for c in num.columns)
 
@@ -3085,6 +3183,22 @@ Dask Name: {name}, {task} tasks"""
         # We wrap values in a delayed for two reasons:
         # - avoid serializing data in every task
         # - avoid cost of traversal of large list in optimizations
+        if isinstance(values, list):
+            # Motivated by https://github.com/dask/dask/issues/9411.  This appears to be
+            # caused by https://github.com/dask/distributed/issues/6368, and further
+            # exacerbated by the fact that the list contains duplicates.  This is a patch until
+            # we can create a better fix for Serialization.
+            try:
+                values = list(set(values))
+            except TypeError:
+                pass
+            if not any(is_dask_collection(v) for v in values):
+                try:
+                    values = np.fromiter(values, dtype=object)
+                except ValueError:
+                    # Numpy 1.23 supports creating arrays of iterables, while lower
+                    # version 1.21.x and 1.22.x do not
+                    pass
         return self.map_partitions(
             M.isin, delayed(values), meta=meta, enforce_metadata=False
         )
@@ -3497,12 +3611,12 @@ class Series(_Frame):
         return """Dask {klass} Structure:
 {data}
 {footer}
-Dask Name: {name}, {task} tasks""".format(
+Dask Name: {name}, {layers}""".format(
             klass=self.__class__.__name__,
             data=self.to_string(),
             footer=footer,
             name=key_split(self._name),
-            task=len(self.dask),
+            layers=maybe_pluralize(len(self.dask.layers), "graph layer"),
         )
 
     def rename(self, index=None, inplace=False, sorted_index=False):
@@ -3603,6 +3717,28 @@ Dask Name: {name}, {task} tasks""".format(
             for floats and ints and fallback to the ``'dask'`` otherwise.
         """
         return quantile(self, q, method=method)
+
+    def median_approximate(self, method="default"):
+        """Return the approximate median of the values over the requested axis.
+
+        Parameters
+        ----------
+        method : {'default', 'tdigest', 'dask'}, optional
+            What method to use. By default will use Dask's internal custom
+            algorithm (``"dask"``).  If set to ``"tdigest"`` will use tdigest
+            for floats and ints and fallback to the ``"dask"`` otherwise.
+        """
+        return self.quantile(q=0.5, method=method)
+
+    @derived_from(pd.Series)
+    def median(self, method="default"):
+        if self.npartitions == 1:
+            # Can provide an exact median in these cases
+            return self.median_approximate(method=method)
+        raise NotImplementedError(
+            "Dask doesn't implement an exact median in all cases as this is hard to do in parallel. "
+            "See the `median_approximate` method instead, which uses an approximate algorithm."
+        )
 
     def _repartition_quantiles(self, npartitions, upsample=1.0):
         """Approximate quantiles of Series used for repartitioning"""
@@ -4029,10 +4165,13 @@ Dask Name: {name}, {task} tasks""".format(
 
     @derived_from(pd.Series)
     def memory_usage(self, index=True, deep=False):
-        result = self.map_partitions(
-            M.memory_usage, index=index, deep=deep, enforce_metadata=False
+        return self.reduction(
+            M.memory_usage,
+            M.sum,
+            chunk_kwargs={"index": index, "deep": deep},
+            split_every=False,
+            token=self._token_prefix + "memory-usage",
         )
-        return delayed(sum)(result.to_delayed())
 
     def __divmod__(self, other):
         res1 = self // other
@@ -4288,6 +4427,16 @@ class Index(Series):
     def is_monotonic_decreasing(self):
         return super().is_monotonic_decreasing
 
+    @derived_from(pd.Index)
+    def memory_usage(self, deep=False):
+        return self.reduction(
+            M.memory_usage,
+            M.sum,
+            chunk_kwargs={"deep": deep},
+            split_every=False,
+            token=self._token_prefix + "memory-usage",
+        )
+
 
 class DataFrame(_Frame):
     """
@@ -4412,7 +4561,8 @@ class DataFrame(_Frame):
 
     @property
     def empty(self):
-        raise NotImplementedError(
+        # __getattr__ will be called after we raise this, so we'll raise it again from there
+        raise AttributeNotImplementedError(
             "Checking whether a Dask DataFrame has any rows may be expensive. "
             "However, checking the number of columns is fast. "
             "Depending on which of these results you need, use either "
@@ -4523,6 +4673,13 @@ class DataFrame(_Frame):
     def __getattr__(self, key):
         if key in self.columns:
             return self[key]
+        elif key == "empty":
+            # self.empty raises AttributeNotImplementedError, which includes
+            # AttributeError, which means we end up here in self.__getattr__,
+            # because DataFrame.__getattribute__ doesn't think the attribute exists
+            # and uses __getattr__ as the fallback. So, get `self.empty` more
+            # forcefully via object.__getattribute__ to raise informative error.
+            object.__getattribute__(self, key)
         else:
             raise AttributeError("'DataFrame' object has no attribute %r" % key)
 
@@ -4768,7 +4925,7 @@ class DataFrame(_Frame):
                     )
 
             # Or be a frame directly
-            elif isinstance(other, DataFrame):
+            elif isinstance(other, DataFrame):  # type: ignore[unreachable]
                 raise NotImplementedError(
                     "Dask dataframe does not yet support multi-indexes.\n"
                     f"You tried to index with a frame with these columns: {list(other.columns)}\n"
@@ -4779,12 +4936,18 @@ class DataFrame(_Frame):
         if isinstance(other, Series):
             # If it's already the index, there's nothing to do
             if other._name == self.index._name:
+                warnings.warn(
+                    "New index has same name as existing, this is a no-op.", UserWarning
+                )
                 return self
 
         # If the name of a column/index
         else:
             # With the same name as the index, there's nothing to do either
             if other == self.index.name:
+                warnings.warn(
+                    "New index has same name as existing, this is a no-op.", UserWarning
+                )
                 return self
 
             # If a missing column, KeyError
@@ -5019,10 +5182,23 @@ class DataFrame(_Frame):
         return self.map_partitions(M.eval, expr, meta=meta, inplace=inplace, **kwargs)
 
     @derived_from(pd.DataFrame)
-    def dropna(self, how="any", subset=None, thresh=None):
-        return self.map_partitions(
-            M.dropna, how=how, subset=subset, thresh=thresh, enforce_metadata=False
-        )
+    def dropna(self, how=no_default, subset=None, thresh=no_default):
+        # These keywords are incompatible with each other.
+        # Don't allow them both to be set.
+        if how is not no_default and thresh is not no_default:
+            raise TypeError(
+                "You cannot set both the how and thresh arguments at the same time."
+            )
+
+        # Only specify `how` or `thresh` keyword if specified by the user
+        # so we utilize other `dropna` keyword defaults appropriately
+        kwargs = {"subset": subset}
+        if how is not no_default:
+            kwargs["how"] = how
+        elif thresh is not no_default:
+            kwargs["thresh"] = thresh
+
+        return self.map_partitions(M.dropna, **kwargs, enforce_metadata=False)
 
     @derived_from(pd.DataFrame)
     def clip(self, lower=None, upper=None, out=None):
@@ -5787,7 +5963,9 @@ class DataFrame(_Frame):
         # pd.Series doesn't have html repr
         data = self._repr_data().to_html(max_rows=max_rows, show_dimensions=False)
         return get_template("dataframe.html.j2").render(
-            data=data, name=self._name, task=self.dask
+            data=data,
+            name=self._name,
+            layers=maybe_pluralize(len(self.dask.layers), "graph layer"),
         )
 
     def _repr_data(self):
@@ -5807,7 +5985,9 @@ class DataFrame(_Frame):
             max_rows=5, show_dimensions=False, notebook=True
         )
         return get_template("dataframe.html.j2").render(
-            data=data, name=self._name, task=self.dask
+            data=data,
+            name=self._name,
+            layers=maybe_pluralize(len(self.dask.layers), "graph layer"),
         )
 
     def _select_columns_or_index(self, columns_or_index):
@@ -5964,15 +6144,18 @@ def is_broadcastable(dfs, s):
     """
     This Series is broadcastable against another dataframe in the sequence
     """
+
+    def compare(s, df):
+        try:
+            return s.divisions == (df.columns.min(), df.columns.max())
+        except TypeError:
+            return False
+
     return (
         isinstance(s, Series)
         and s.npartitions == 1
         and s.known_divisions
-        and any(
-            s.divisions == (df.columns.min(), df.columns.max())
-            for df in dfs
-            if isinstance(df, DataFrame)
-        )
+        and any(compare(s, df) for df in dfs if isinstance(df, DataFrame))
     )
 
 
@@ -6244,6 +6427,8 @@ def apply_concat_apply(
 
     >>> apply_concat_apply([a, b], chunk=chunk, aggregate=agg)  # doctest: +SKIP
     """
+    if split_out is None:
+        split_out = 1
     if chunk_kwargs is None:
         chunk_kwargs = dict()
     if aggregate_kwargs is None:
@@ -6393,7 +6578,7 @@ def _emulate(func, *args, udf=False, **kwargs):
     Apply a function using args / kwargs. If arguments contain dd.DataFrame /
     dd.Series, using internal cache (``_meta``) for calculation
     """
-    with raise_on_meta_error(funcname(func), udf=udf):
+    with raise_on_meta_error(funcname(func), udf=udf), check_numeric_only_deprecation():
         return func(*_extract_meta(args, True), **_extract_meta(kwargs, True))
 
 
@@ -6423,7 +6608,8 @@ def map_partitions(
         Whether to enforce at runtime that the structure of the DataFrame
         produced by ``func`` actually matches the structure of ``meta``.
         This will rename and reorder columns for each partition,
-        and will raise an error if this doesn't work or types don't match.
+        and will raise an error if this doesn't work,
+        but it won't raise if dtypes don't match.
     transform_divisions : bool, default True
         Whether to apply the function onto the divisions and apply those
         transformed divisions to the output.
@@ -6464,7 +6650,6 @@ def map_partitions(
     dfs = [df for df in args if isinstance(df, _Frame)]
 
     meta = _get_meta_map_partitions(args, dfs, func, kwargs, meta, parent_meta)
-
     if all(isinstance(arg, Scalar) for arg in args):
         layer = {
             (name, 0): (
@@ -6901,7 +7086,7 @@ def cov_corr_chunk(df, corr=False):
     df = df.astype("float64", copy=False)
     sums = np.zeros_like(df.values, shape=shape)
     counts = np.zeros_like(df.values, shape=shape)
-    for idx, col in enumerate(df):
+    for idx in range(len(df.columns)):
         mask = df.iloc[:, idx].notnull()
         sums[idx] = df[mask].sum().values
         counts[idx] = df[mask].count().values
@@ -6913,7 +7098,7 @@ def cov_corr_chunk(df, corr=False):
             mu = (sums / counts).T
         m = np.zeros_like(df.values, shape=shape)
         mask = df.isnull().values
-        for idx, x in enumerate(df):
+        for idx in range(len(df.columns)):
             # Avoid using ufunc.outer (not supported by cupy)
             mu_discrepancy = (
                 np.subtract(df.iloc[:, idx].values[:, None], mu[idx][None, :]) ** 2
@@ -7322,7 +7507,9 @@ def repartition_npartitions(df, npartitions):
         ]
         return _repartition_from_boundaries(df, new_partitions_boundaries, new_name)
     else:
-        original_divisions = divisions = pd.Series(df.divisions)
+        # Drop duplcates in case last partition has same
+        # value for min and max division
+        original_divisions = divisions = pd.Series(df.divisions).drop_duplicates()
         if df.known_divisions and (
             np.issubdtype(divisions.dtype, np.datetime64)
             or np.issubdtype(divisions.dtype, np.number)
@@ -7995,3 +8182,8 @@ def _raise_if_not_series_or_dataframe(x, funcname):
             "`%s` is only supported with objects that are Dataframes or Series"
             % funcname
         )
+
+
+def _getattr_numeric_only(*args, _dask_method_name, **kwargs):
+    with check_numeric_only_deprecation():
+        return getattr(M, _dask_method_name)(*args, **kwargs)
